@@ -1,0 +1,78 @@
+name: Publish PHP Symfony SDK (Packagist)
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  publish:
+    name: Publish bella-baxter/symfony
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          tools: composer
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          # Tags use 'preview' but PHP uses 'beta' (Composer doesn't support 'preview')
+          PHP_VERSION=$(echo "$TAG_VERSION" | sed 's/-preview\./-beta./')
+          echo "version=$PHP_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Publishing bella-baxter/symfony $PHP_VERSION (from tag $TAG_VERSION)"
+
+      - name: Verify VERSION file matches tag
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          FILE_VERSION=$(cat VERSION 2>/dev/null || echo "")
+          if [ "$FILE_VERSION" != "$VERSION" ]; then
+            echo "::error::VERSION file has '$FILE_VERSION' but expected '$VERSION' — run release-sdk.yml first"
+            exit 1
+          fi
+          echo "✓ VERSION file $FILE_VERSION matches tag $VERSION"
+
+      - name: Validate composer.json
+        run: composer validate --strict
+
+      - name: Register or update bella-baxter/symfony on Packagist
+        env:
+          PACKAGIST_AUTH: "${{ secrets.PACKAGIST_USERNAME }}:${{ secrets.PACKAGIST_MAIN_API_TOKEN }}"
+        run: |
+          PACKAGE="bella-baxter/symfony"
+          REPO_URL="https://github.com/${{ github.repository }}"
+
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://packagist.org/packages/${PACKAGE}.json")
+          if [ "$STATUS" = "404" ]; then
+            echo "Package $PACKAGE not found — creating..."
+            RESPONSE=$(curl -sS -X POST \
+              -H "Content-Type: application/json" \
+              -H "Authorization: Bearer $PACKAGIST_AUTH" \
+              "https://packagist.org/api/create-package" \
+              -d "{\"repository\":\"$REPO_URL\"}")
+          else
+            echo "Package $PACKAGE exists — updating..."
+            RESPONSE=$(curl -sS -X POST \
+              -H "Content-Type: application/json" \
+              -H "Authorization: Bearer $PACKAGIST_AUTH" \
+              "https://packagist.org/api/update-package" \
+              -d "{\"repository\":\"https://packagist.org/packages/$PACKAGE\"}")
+          fi
+          echo "$RESPONSE"
+          echo "$RESPONSE" | grep -q '"status":"success"' || (echo "::error::Packagist API call failed: $RESPONSE" && exit 1)
+
+  notify:
+    runs-on: ubuntu-latest
+    needs: publish
+    if: always()
+    steps:
+      - uses: slackapi/slack-github-action@v3.0.1
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: webhook-trigger
+          payload: |
+            text: "*SDK PHP Symfony (Packagist) publish ${{ github.ref_name }}*: ${{ needs.publish.result }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
